@@ -1,0 +1,247 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Retail sales data warehouse on Amazon Redshift Serverless, loaded from curated S3 Parquet by a
+  Step Functions state machine (optional Glue job -> schema -> COPY -> transform -> quality gate).
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Default: dev
+  BaseCapacity:
+    Type: Number
+    Default: 8
+    Description: Redshift Serverless base capacity in RPUs. Keep it small for a portfolio project.
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Optional. Leave empty to use the default VPC.
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Optional. Leave empty to use the default security group.
+
+Conditions:
+  HasSubnets: !Not [!Equals [!Join ["", !Ref SubnetIds], ""]]
+  HasSecurityGroups: !Not [!Equals [!Join ["", !Ref SecurityGroupIds], ""]]
+
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-data-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  RedshiftCopyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - redshift.amazonaws.com
+                - redshift-serverless.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-curated-zone
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${DataBucket.Arn}/curated/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+
+  Namespace:
+    Type: AWS::RedshiftServerless::Namespace
+    Properties:
+      NamespaceName: !Sub "${AWS::StackName}-ns"
+      DbName: !Ref DatabaseName
+      AdminUsername: admin
+      ManageAdminPassword: true
+      IamRoles:
+        - !GetAtt RedshiftCopyRole.Arn
+      DefaultIamRoleArn: !GetAtt RedshiftCopyRole.Arn
+
+  Workgroup:
+    Type: AWS::RedshiftServerless::Workgroup
+    DependsOn: Namespace
+    Properties:
+      WorkgroupName: !Sub "${AWS::StackName}-wg"
+      NamespaceName: !Sub "${AWS::StackName}-ns"
+      BaseCapacity: !Ref BaseCapacity
+      PubliclyAccessible: false
+      SubnetIds: !If [HasSubnets, !Ref SubnetIds, !Ref "AWS::NoValue"]
+      SecurityGroupIds: !If [HasSecurityGroups, !Ref SecurityGroupIds, !Ref "AWS::NoValue"]
+
+  RunSqlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: redshift-data-api
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift-data:ExecuteStatement
+                  - redshift-data:BatchExecuteStatement
+                  - redshift-data:DescribeStatement
+                  - redshift-data:GetStatementResult
+                Resource: "*"
+              - Effect: Allow
+                Action: redshift-serverless:GetCredentials
+                Resource: !GetAtt Workgroup.Workgroup.WorkgroupArn
+
+  RunSqlFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: handler.handler
+      Timeout: 900
+      MemorySize: 256
+      Role: !GetAtt RunSqlRole.Arn
+      Code: ../build/run_sql
+      Environment:
+        Variables:
+          WORKGROUP: !Sub "${AWS::StackName}-wg"
+          DATABASE: !Ref DatabaseName
+          BUCKET: !Ref DataBucket
+          IAM_ROLE_ARN: !GetAtt RedshiftCopyRole.Arn
+
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: run-pipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt RunSqlFunction.Arn
+              - Effect: Allow
+                Action:
+                  - glue:StartJobRun
+                  - glue:GetJobRun
+                  - glue:GetJobRuns
+                  - glue:BatchStopJobRun
+                Resource: !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:job/*"
+
+  PipelineStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-pipeline"
+      RoleArn: !GetAtt StateMachineRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Optional Glue job, then Redshift: schema, COPY, transform, maintenance, quality gate.",
+          "StartAt": "GlueRequested",
+          "States": {
+            "GlueRequested": {
+              "Type": "Choice",
+              "Choices": [{"Variable": "$.glue_job_name", "IsPresent": true, "Next": "RunGlueJob"}],
+              "Default": "CreateSchema"
+            },
+            "RunGlueJob": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {"JobName.$": "$.glue_job_name"},
+              "ResultPath": "$.glue_result",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "PipelineFailed"}],
+              "Next": "CreateSchema"
+            },
+            "CreateSchema": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${RunSqlFunction.Arn}", "Payload": {"sql_file": "sql/01_schema.sql", "batch_id.$": "$$.Execution.Name"}},
+              "ResultSelector": {"summary.$": "$.Payload"},
+              "ResultPath": "$.schema_result",
+              "Retry": [{"ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "PipelineFailed"}],
+              "Next": "LoadFromS3"
+            },
+            "LoadFromS3": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${RunSqlFunction.Arn}", "Payload": {"sql_file": "sql/02_load.sql", "batch_id.$": "$$.Execution.Name"}},
+              "ResultSelector": {"summary.$": "$.Payload"},
+              "ResultPath": "$.load_result",
+              "Retry": [{"ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "PipelineFailed"}],
+              "Next": "Transform"
+            },
+            "Transform": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${RunSqlFunction.Arn}", "Payload": {"sql_file": "sql/03_transform.sql", "batch_id.$": "$$.Execution.Name"}},
+              "ResultSelector": {"summary.$": "$.Payload"},
+              "ResultPath": "$.transform_result",
+              "Retry": [{"ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "PipelineFailed"}],
+              "Next": "Maintenance"
+            },
+            "Maintenance": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${RunSqlFunction.Arn}", "Payload": {"sql_file": "sql/04_maintenance.sql", "batch_id.$": "$$.Execution.Name"}},
+              "ResultSelector": {"summary.$": "$.Payload"},
+              "ResultPath": "$.maintenance_result",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "PipelineFailed"}],
+              "Next": "QualityGate"
+            },
+            "QualityGate": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${RunSqlFunction.Arn}", "Payload": {"sql_file": "sql/05_quality_checks.sql", "mode": "checks", "batch_id.$": "$$.Execution.Name"}},
+              "ResultSelector": {"summary.$": "$.Payload"},
+              "ResultPath": "$.quality_result",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "PipelineFailed"}],
+              "End": true
+            },
+            "PipelineFailed": {
+              "Type": "Fail",
+              "Error": "WarehousePipelineFailed",
+              "Cause": "A pipeline step failed. Open the execution history for the failing state and its error."
+            }
+          }
+        }
+
+Outputs:
+  DataBucketName:
+    Value: !Ref DataBucket
+  StateMachineArn:
+    Value: !Ref PipelineStateMachine
+  WorkgroupName:
+    Value: !Sub "${AWS::StackName}-wg"
+  WorkgroupArn:
+    Value: !GetAtt Workgroup.Workgroup.WorkgroupArn
+  DatabaseName:
+    Value: !Ref DatabaseName

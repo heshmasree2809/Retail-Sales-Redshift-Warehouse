@@ -10,7 +10,7 @@ class LocalPipelineTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
-        cls.conn, cls.manifest = local.build(rows=30_000, out_dir=cls.tmp, seed=7, bad_rate=0.02)
+        cls.conn, cls.manifest = local.build(rows=30_000, out_dir=cls.tmp, seed=7, bad_rate=0.01)
 
     def count(self, sql):
         return self.conn.execute(sql).fetchone()[0]

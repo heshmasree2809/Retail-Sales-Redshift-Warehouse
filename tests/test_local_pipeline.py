@@ -13,7 +13,7 @@ class LocalPipelineTest(unittest.TestCase):
         cls.conn, cls.manifest = local.build(rows=30_000, out_dir=cls.tmp, seed=7, bad_rate=0.01)
 
     def count(self, sql):
-        return self.conn.execute(sql).fetchone()[1]
+        return self.conn.execute(sql).fetchone()[0]
 
     def test_rejects_match_what_the_generator_injected(self):
         got = dict(self.conn.execute("SELECT reject_reason, COUNT(*) FROM sales_rejects GROUP BY 1").fetchall())

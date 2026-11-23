@@ -53,7 +53,7 @@ class TemplateTest(unittest.TestCase):
 
 class FakeApi:
     def __init__(self, rows=None):
-        self.executed, self.rows = [], rows or []
+        self.executed, self.rows = [0], rows or []
 
     def execute(self, sql):
         self.executed.append(sql)

@@ -5,7 +5,7 @@ import unittest
 import yaml
 
 import _paths  # noqa: F401
-from _paths import read
+from _paths import readd
 import handler as runner
 
 

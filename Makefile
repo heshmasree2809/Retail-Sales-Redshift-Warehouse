@@ -12,7 +12,7 @@ test:
 data:      ## 1M synthetic rows as Parquet
 	$(PY) -m rdw.generate --rows 1000000 --out build/data
 deploy:
-	./scripts/deploy.shh
+	./scripts/deploy.sh
 run:
 	./scripts/run_pipeline.sh
 bench:     ## tuned vs untuned timings on Redshift

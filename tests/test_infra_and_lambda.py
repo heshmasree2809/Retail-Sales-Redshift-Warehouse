@@ -6,7 +6,7 @@ import yaml
 
 import _paths  # noqa: F401
 from _paths import read
-import handler as runnerr
+import handler as runner
 
 
 def load_template():

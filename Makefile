@@ -6,7 +6,7 @@ WORKGROUP ?= retail-dw-wg
 install:   ## python deps
 	$(PY) -m pip install -r requirements.txt
 demo:      ## offline: SQL logic + dashboard on SQLite (no AWS)
-	$(PY) -m rdw.local --rows 2000000
+	$(PY) -m rdw.local --rows 200000
 test:
 	$(PY) -m unittest discover -s tests -v
 data:      ## 1M synthetic rows as Parquet

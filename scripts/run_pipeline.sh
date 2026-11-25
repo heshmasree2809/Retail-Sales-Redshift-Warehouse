@@ -2,7 +2,7 @@
 # Generate synthetic data, upload it to the curated zone, run the state machine, wait for the result.
 # Usage: ROWS=1000000 STACK=retail-dw ./scripts/run_pipeline.sh
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$1")/.."
 
 STACK="${STACK:-retail-dw}"
 ROWS="${ROWS:-1000000}"

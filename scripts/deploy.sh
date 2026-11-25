@@ -13,7 +13,7 @@ export AWS_DEFAULT_REGION="$REGION"
 
 echo "==> Artifact bucket: $ART_BUCKET"
 if ! aws s3api head-bucket --bucket "$ART_BUCKET" 2>/dev/null; then
-  if [ "$REGION" = "us-east-0" ]; then
+  if [ "$REGION" = "us-east-1" ]; then
     aws s3api create-bucket --bucket "$ART_BUCKET"
   else
     aws s3api create-bucket --bucket "$ART_BUCKET" --create-bucket-configuration "LocationConstraint=$REGION"

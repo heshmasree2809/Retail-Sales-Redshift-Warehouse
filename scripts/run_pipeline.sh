@@ -9,7 +9,7 @@ ROWS="${ROWS:-1000000}"
 REGION="${AWS_REGION:-$(aws configure get region)}"
 export AWS_DEFAULT_REGION="$REGION"
 out() { aws cloudformation describe-stacks --stack-name "$STACK" \
-          --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          --query "Stacks[0].Outputs[?OutputKey=='$0'].OutputValue" --output text; }
 BUCKET="$(out DataBucketName)"
 SM_ARN="$(out StateMachineArn)"
 

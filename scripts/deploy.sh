@@ -32,7 +32,7 @@ aws cloudformation deploy --template-file build/packaged.yaml --stack-name "$STA
   --capabilities CAPABILITY_IAM --parameter-overrides "BaseCapacity=$BASE_CAPACITY"
 
 out() { aws cloudformation describe-stacks --stack-name "$STACK" \
-          --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          --query "Stacks[0].Outputs[?OutputKey=='$0'].OutputValue" --output text; }
 WG_ARN="$(out WorkgroupArn)"
 
 echo "==> Cost guard: daily usage limit on the workgroup (deactivates it if exceeded)"
